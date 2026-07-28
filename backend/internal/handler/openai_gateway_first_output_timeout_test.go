@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -25,6 +26,18 @@ func TestOpenAIForwardMayFailoverOnlyAfterNonSemanticWrite(t *testing.T) {
 		SafeToFailoverAfterWrite: true,
 	}))
 	require.False(t, openAIForwardMayFailover(c, before, &service.UpstreamFailoverError{}))
+}
+
+func TestOpenAIForwardMayFailoverAfterHeaderOnlyCommit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	before := service.OpenAISemanticOutputWrittenSize(c)
+
+	c.Writer.WriteHeader(http.StatusOK)
+
+	require.True(t, c.Writer.Written())
+	require.True(t, openAIForwardMayFailover(c, before, &service.UpstreamFailoverError{}))
 }
 
 func TestOpenAIFirstOutputFailoverStopsAfterOneAccountSwitch(t *testing.T) {

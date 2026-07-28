@@ -181,6 +181,19 @@ func OpenAICompactKeepaliveAdjustedWrittenSize(c *gin.Context) int {
 	return -1
 }
 
+// OpenAISemanticOutputWrittenSize returns the number of response bytes that
+// make an in-flight Responses request unsafe to replay on another account.
+// Gin records a header-only HTTP 200 as size 0, while compact keepalives only
+// write SSE comments. Neither is visible semantic output and therefore must
+// not prevent request-scoped failover.
+func OpenAISemanticOutputWrittenSize(c *gin.Context) int {
+	size := OpenAICompactKeepaliveAdjustedWrittenSize(c)
+	if size <= 0 {
+		return -1
+	}
+	return size
+}
+
 // openAICompactKeepaliveWriter 包装 gin.ResponseWriter：写侧方法先停拍心跳
 // （互斥锁下建立 happens-before），读侧方法仅加锁不停拍——热路径的状态读取
 // （如 Forward 前的 Size 快照）不能误杀心跳。心跳 goroutine 直接写内层

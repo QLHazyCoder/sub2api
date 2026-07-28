@@ -526,7 +526,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		forwardStart := time.Now()
 		// 用扣除 compact 心跳字节的口径快照：心跳注释不构成语义响应，
 		// 不能因心跳字节变化而放弃 failover 换号（#3887）。
-		writerSizeBeforeForward := service.OpenAICompactKeepaliveAdjustedWrittenSize(c)
+		writerSizeBeforeForward := service.OpenAISemanticOutputWrittenSize(c)
 		// 跨 passthrough 边界的 failover：从 Kiro 等透传账号切到 Bedrock 等非透传账号前，
 		// 从不可变的 canonical forwardBody 派生本次尝试 body 并整块剔除上游私有的加密
 		// reasoning item（含耦合的 id/summary），避免非透传上游 400 拒绝 Kiro reasoning 形态。
@@ -575,7 +575,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 						h.handleFailoverExhausted(c, failoverErr, true)
 						return
 					}
-					if failoverErr.SafeToFailoverAfterWrite && c.Writer.Written() {
+					if failoverErr.SafeToFailoverAfterWrite && service.OpenAISemanticOutputWrittenSize(c) > 0 {
 						streamStarted = true
 					}
 					if failoverErr.ShouldReportAccountScheduleFailure() {
@@ -2519,7 +2519,7 @@ func openAIForwardErrorAlreadyCommunicated(c *gin.Context, writerSizeBeforeForwa
 	}
 	// 与快照同口径：排除 compact 心跳字节，避免"仅心跳写出"被误判为
 	// 响应已写出（#3887）。
-	if service.OpenAICompactKeepaliveAdjustedWrittenSize(c) == writerSizeBeforeForward ||
+	if service.OpenAISemanticOutputWrittenSize(c) == writerSizeBeforeForward ||
 		service.OpenAIImagesJSONKeepaliveAdjustedWrittenSize(c) == writerSizeBeforeForward {
 		return false
 	}
@@ -2548,7 +2548,7 @@ func openAIForwardMayFailover(c *gin.Context, writerSizeBeforeForward int, failo
 	if c == nil || c.Writer == nil {
 		return false
 	}
-	if service.OpenAICompactKeepaliveAdjustedWrittenSize(c) == writerSizeBeforeForward {
+	if service.OpenAISemanticOutputWrittenSize(c) == writerSizeBeforeForward {
 		return true
 	}
 	return failoverErr != nil && failoverErr.SafeToFailoverAfterWrite

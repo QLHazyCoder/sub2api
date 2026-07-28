@@ -731,7 +731,7 @@ func openAIStreamClientOutputStarted(c *gin.Context, localStarted bool) bool {
 	if localStarted {
 		return true
 	}
-	return c != nil && c.Writer != nil && c.Writer.Written()
+	return OpenAISemanticOutputWrittenSize(c) > 0
 }
 
 func openAIStreamEventIsPreamble(eventType string) bool {
