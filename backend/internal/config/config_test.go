@@ -365,13 +365,13 @@ func TestLoadDefaultSchedulingConfig(t *testing.T) {
 	}
 }
 
-func TestLoadDefaultOpenAIFirstOutputTimeoutsDisabled(t *testing.T) {
+func TestLoadDefaultOpenAIFirstOutputTimeouts(t *testing.T) {
 	resetViperWithJWTSecret(t)
 
 	cfg, err := Load()
 	require.NoError(t, err)
-	require.Zero(t, cfg.Gateway.OpenAIFirstOutputTimeoutSeconds)
-	require.Zero(t, cfg.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds)
+	require.Equal(t, 60, cfg.Gateway.OpenAIFirstOutputTimeoutSeconds)
+	require.Equal(t, 60, cfg.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds)
 }
 
 func TestLoadOpenAIFirstOutputTimeoutsFromEnv(t *testing.T) {
@@ -2512,6 +2512,12 @@ func TestLoad_DefaultGatewayImageStreamConfig(t *testing.T) {
 	}
 	if cfg.Gateway.StreamKeepaliveInterval != 10 {
 		t.Fatalf("stream_keepalive_interval = %d, want 10", cfg.Gateway.StreamKeepaliveInterval)
+	}
+	if cfg.Gateway.OpenAIFirstOutputTimeoutSeconds != 60 {
+		t.Fatalf("openai_first_output_timeout_seconds = %d, want 60", cfg.Gateway.OpenAIFirstOutputTimeoutSeconds)
+	}
+	if cfg.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds != 60 {
+		t.Fatalf("openai_high_effort_first_output_timeout_seconds = %d, want 60", cfg.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds)
 	}
 	if cfg.Gateway.ImageStreamDataIntervalTimeout != 900 {
 		t.Fatalf("image_stream_data_interval_timeout = %d, want 900", cfg.Gateway.ImageStreamDataIntervalTimeout)

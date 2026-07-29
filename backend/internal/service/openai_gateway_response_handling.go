@@ -501,6 +501,32 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				line = "data: " + data
 				eventType = strings.TrimSpace(gjson.GetBytes(dataBytes, "type").String())
 			}
+			if openAIStreamTerminalShouldFailover(
+				dataBytes,
+				eventType,
+				openAIStreamClientOutputStarted(c, clientOutputStarted),
+			) {
+				streamEarlyErr = s.newOpenAIStreamFailoverError(
+					c,
+					account,
+					false,
+					upstreamRequestID,
+					dataBytes,
+					"OpenAI stream returned an empty terminal event without usage",
+				)
+				return
+			}
+			if strings.TrimSpace(data) == "[DONE]" && !openAIStreamClientOutputStarted(c, clientOutputStarted) {
+				streamEarlyErr = s.newOpenAIStreamFailoverError(
+					c,
+					account,
+					false,
+					upstreamRequestID,
+					nil,
+					"OpenAI stream returned [DONE] before semantic output or usage",
+				)
+				return
+			}
 			if sanitizedData, sanitized := sanitizeOpenAIResponseFailedEventForClient(
 				dataBytes,
 				eventType,

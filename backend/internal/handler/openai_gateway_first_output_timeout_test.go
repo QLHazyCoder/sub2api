@@ -34,9 +34,11 @@ func TestOpenAIForwardMayFailoverAfterHeaderOnlyCommit(t *testing.T) {
 	c, _ := gin.CreateTestContext(rec)
 	before := service.OpenAISemanticOutputWrittenSize(c)
 
-	c.Writer.WriteHeader(http.StatusOK)
+	c.Status(http.StatusOK)
+	c.Writer.WriteHeaderNow()
 
 	require.True(t, c.Writer.Written())
+	require.Zero(t, c.Writer.Size())
 	require.True(t, openAIForwardMayFailover(c, before, &service.UpstreamFailoverError{}))
 }
 
