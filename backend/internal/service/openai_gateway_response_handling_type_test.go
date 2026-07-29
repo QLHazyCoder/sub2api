@@ -42,6 +42,33 @@ func TestOpenAIStreamEventIsTerminalWithTypeMatchesExistingSemantics(t *testing.
 	}
 }
 
+func TestOpenAIStreamDataStartsClientOutputUsesSemanticPayload(t *testing.T) {
+	tests := []struct {
+		name      string
+		eventType string
+		data      string
+		want      bool
+	}{
+		{name: "created is preamble", eventType: "response.created", data: `{"type":"response.created"}`, want: false},
+		{name: "empty message item is structural", eventType: "response.output_item.added", data: `{"type":"response.output_item.added","item":{"type":"message","content":[]}}`, want: false},
+		{name: "message item with text is semantic", eventType: "response.output_item.added", data: `{"type":"response.output_item.added","item":{"type":"message","content":[{"type":"output_text","text":"hello"}]}}`, want: true},
+		{name: "empty content part is structural", eventType: "response.content_part.added", data: `{"type":"response.content_part.added","part":{"type":"output_text","text":""}}`, want: false},
+		{name: "content part with text is semantic", eventType: "response.content_part.added", data: `{"type":"response.content_part.added","part":{"type":"output_text","text":"hello"}}`, want: true},
+		{name: "empty text delta is structural", eventType: "response.output_text.delta", data: `{"type":"response.output_text.delta","delta":""}`, want: false},
+		{name: "text delta is semantic", eventType: "response.output_text.delta", data: `{"type":"response.output_text.delta","delta":"hello"}`, want: true},
+		{name: "empty function arguments delta is structural", eventType: "response.function_call_arguments.delta", data: `{"type":"response.function_call_arguments.delta","delta":""}`, want: false},
+		{name: "function call item is semantic", eventType: "response.output_item.added", data: `{"type":"response.output_item.added","item":{"type":"function_call","name":"exec_command","arguments":""}}`, want: true},
+		{name: "terminal event is delivered", eventType: "response.completed", data: `{"type":"response.completed","response":{"output":[]}}`, want: true},
+		{name: "unknown event remains conservative", eventType: "response.future_event", data: `{"type":"response.future_event"}`, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, openAIStreamDataStartsClientOutput(tt.data, tt.eventType))
+		})
+	}
+}
+
 var (
 	benchmarkOpenAIResponseSSEEventTypeSink string
 	benchmarkOpenAIResponseSSETerminalSink  bool

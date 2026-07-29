@@ -734,24 +734,91 @@ func openAIStreamClientOutputStarted(c *gin.Context, localStarted bool) bool {
 	return OpenAISemanticOutputWrittenSize(c) > 0
 }
 
-func openAIStreamEventIsPreamble(eventType string) bool {
-	switch strings.TrimSpace(eventType) {
-	case "response.created", "response.in_progress":
-		return true
-	default:
-		return false
-	}
-}
-
 func openAIStreamDataStartsClientOutput(data, eventType string) bool {
 	trimmed := strings.TrimSpace(data)
 	if trimmed == "" {
 		return false
 	}
-	if strings.TrimSpace(eventType) == "response.failed" {
+
+	eventType = strings.TrimSpace(eventType)
+	switch eventType {
+	case "response.created", "response.in_progress", "response.failed":
+		return false
+	case "response.completed", "response.done", "response.incomplete", "response.cancelled", "response.canceled":
+		// A terminal event must still be delivered when the response contains no
+		// output. response.failed is handled separately by the failover logic.
+		return true
+	case "response.output_text.delta", "response.reasoning_summary_text.delta", "response.reasoning_text.delta",
+		"response.output_audio.delta", "response.audio_transcript.delta", "response.refusal.delta",
+		"response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
+		return openAIStreamNonEmptyStringField(data, "delta")
+	case "response.output_text.done", "response.reasoning_summary_text.done":
+		return openAIStreamNonEmptyStringField(data, "text")
+	case "response.function_call_arguments.done":
+		return openAIStreamNonEmptyStringField(data, "arguments")
+	case "response.custom_tool_call_input.done":
+		return openAIStreamNonEmptyStringField(data, "input")
+	case "response.content_part.added", "response.content_part.done", "response.reasoning_summary_part.added", "response.reasoning_summary_part.done":
+		return openAIStreamContentPartStartsClientOutput(data)
+	case "response.output_item.added", "response.output_item.done":
+		return openAIStreamOutputItemStartsClientOutput(data)
+	default:
+		// Unknown non-lifecycle events remain conservative: a future semantic
+		// event must not be replayed after it may already have reached a client.
+		return true
+	}
+}
+
+func openAIStreamNonEmptyStringField(data, path string) bool {
+	return strings.TrimSpace(gjson.Get(data, path).String()) != ""
+}
+
+func openAIStreamContentPartStartsClientOutput(data string) bool {
+	part := gjson.Get(data, "part")
+	if !part.Exists() || !part.IsObject() {
 		return false
 	}
-	return !openAIStreamEventIsPreamble(eventType)
+	for _, field := range []string{"text", "image_url", "image_url.url", "audio", "audio_url"} {
+		if strings.TrimSpace(part.Get(field).String()) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func openAIStreamOutputItemStartsClientOutput(data string) bool {
+	item := gjson.Get(data, "item")
+	if !item.Exists() || !item.IsObject() {
+		return false
+	}
+
+	itemType := strings.TrimSpace(item.Get("type").String())
+	switch itemType {
+	case "message":
+		for _, content := range item.Get("content").Array() {
+			for _, field := range []string{"text", "image_url", "image_url.url", "audio", "audio_url"} {
+				if strings.TrimSpace(content.Get(field).String()) != "" {
+					return true
+				}
+			}
+		}
+		return false
+	case "reasoning", "compaction", "compaction_summary":
+		if strings.TrimSpace(item.Get("encrypted_content").String()) != "" {
+			return true
+		}
+		for _, summary := range item.Get("summary").Array() {
+			if strings.TrimSpace(summary.Get("text").String()) != "" {
+				return true
+			}
+		}
+		return false
+	default:
+		// Tool-call creation is already semantic even when its arguments will
+		// arrive in later delta events; replaying after this point can duplicate
+		// a client-visible tool turn. Keep unknown item kinds conservative too.
+		return true
+	}
 }
 
 func openAIStreamFailedEventSemanticStatus(payload []byte, message string) int {
