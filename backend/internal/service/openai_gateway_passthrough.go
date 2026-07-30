@@ -1051,6 +1051,40 @@ func openAIStreamFailedEventShouldFailover(payload []byte, message string) bool 
 	return true
 }
 
+func logOpenAIStreamFailedFailoverDecision(
+	ctx context.Context,
+	account *Account,
+	passthrough bool,
+	upstreamRequestID string,
+	payload []byte,
+	clientOutputStarted bool,
+	willFailover bool,
+	reason string,
+) {
+	accountID := int64(0)
+	if account != nil {
+		accountID = account.ID
+	}
+	errorCode := strings.TrimSpace(gjson.GetBytes(payload, "response.error.code").String())
+	if errorCode == "" {
+		errorCode = strings.TrimSpace(gjson.GetBytes(payload, "error.code").String())
+	}
+	errorType := strings.TrimSpace(gjson.GetBytes(payload, "response.error.type").String())
+	if errorType == "" {
+		errorType = strings.TrimSpace(gjson.GetBytes(payload, "error.type").String())
+	}
+	logger.FromContext(ctx).With(
+		zap.Int64("account_id", accountID),
+		zap.Bool("passthrough", passthrough),
+		zap.String("upstream_request_id", strings.TrimSpace(upstreamRequestID)),
+		zap.String("error_code", errorCode),
+		zap.String("error_type", errorType),
+		zap.Bool("client_output_started", clientOutputStarted),
+		zap.Bool("will_failover", willFailover),
+		zap.String("reason", reason),
+	).Warn("openai.response_failed_failover_decision")
+}
+
 func (s *OpenAIGatewayService) recordOpenAIStreamUpstreamError(
 	c *gin.Context,
 	account *Account,
@@ -1338,8 +1372,10 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithReasoning(
 						UpstreamOutTok: usage.OutputTokens,
 					})
 				}
-				if !openAIStreamClientOutputStarted(c, clientOutputStarted) {
+				outputStarted := openAIStreamClientOutputStarted(c, clientOutputStarted)
+				if !outputStarted {
 					if status, errType, errMsg, matched := applyOpenAIStreamFailedErrorPassthroughRule(c, account.Platform, dataBytes, failedMessage); matched {
+						logOpenAIStreamFailedFailoverDecision(ctx, account, true, upstreamRequestID, dataBytes, outputStarted, false, "passthrough_rule")
 						// 命中透传规则也要记录 ops 上游错误事件（对齐 CC/Messages 与
 						// antigravity 先例），否则透传命中的 failed 在监控中不可见。
 						s.recordOpenAIStreamUpstreamError(c, account, true, upstreamRequestID, "http_error", dataBytes, failedMessage)
@@ -1354,10 +1390,16 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithReasoning(
 						return resultWithUsage(), fmt.Errorf("upstream response failed: passthrough rule matched message=%s", errMsg)
 					}
 					if openAIStreamFailedEventShouldFailover(dataBytes, failedMessage) {
+						logOpenAIStreamFailedFailoverDecision(ctx, account, true, upstreamRequestID, dataBytes, outputStarted, true, "retryable_pre_output")
 						return resultWithUsage(),
 							s.newOpenAIStreamFailoverError(c, account, true, upstreamRequestID, dataBytes, failedMessage)
 					}
 				}
+				reason := "non_retryable"
+				if outputStarted {
+					reason = "client_output_started"
+				}
+				logOpenAIStreamFailedFailoverDecision(ctx, account, true, upstreamRequestID, dataBytes, outputStarted, false, reason)
 				forceFlushFailedEvent = true
 				sawFailedEvent = true
 			}

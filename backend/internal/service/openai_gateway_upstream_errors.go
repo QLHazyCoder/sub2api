@@ -147,6 +147,13 @@ func isOpenAITransientProcessingError(upstreamStatusCode int, upstreamMsg string
 		if strings.Contains(lower, "selected model is at capacity") {
 			return true
 		}
+		// Responses streams sometimes carry this transient server-side condition
+		// as an invalid_request_error. Match the message before callers inspect
+		// that misleading type so a pre-output request can fail over safely.
+		if strings.Contains(lower, "servers are currently overloaded") ||
+			strings.Contains(lower, "server is currently overloaded") {
+			return true
+		}
 		return strings.Contains(lower, "you can retry your request") &&
 			strings.Contains(lower, "help.openai.com") &&
 			strings.Contains(lower, "request id")

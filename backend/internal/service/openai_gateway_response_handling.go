@@ -430,9 +430,11 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 						UpstreamOutTok: usage.OutputTokens,
 					})
 				}
-				if !openAIStreamClientOutputStarted(c, clientOutputStarted) {
+				outputStarted := openAIStreamClientOutputStarted(c, clientOutputStarted)
+				if !outputStarted {
 					if status, errType, errMsg, matched := applyOpenAIStreamFailedErrorPassthroughRule(c, account.Platform, dataBytes, failedMessage); matched {
 						sawFailedEvent = true
+						logOpenAIStreamFailedFailoverDecision(ctx, account, false, upstreamRequestID, dataBytes, outputStarted, false, "passthrough_rule")
 						// 命中透传规则也要记录 ops 上游错误事件（对齐 CC/Messages 与
 						// antigravity 先例），否则透传命中的 failed 在监控中不可见。
 						s.recordOpenAIStreamUpstreamError(c, account, false, upstreamRequestID, "http_error", dataBytes, failedMessage)
@@ -449,10 +451,16 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 					}
 					if openAIStreamFailedEventShouldFailover(dataBytes, failedMessage) {
 						sawFailedEvent = true
+						logOpenAIStreamFailedFailoverDecision(ctx, account, false, upstreamRequestID, dataBytes, outputStarted, true, "retryable_pre_output")
 						streamEarlyErr = s.newOpenAIStreamFailoverError(c, account, false, upstreamRequestID, dataBytes, failedMessage)
 						return
 					}
 				}
+				reason := "non_retryable"
+				if outputStarted {
+					reason = "client_output_started"
+				}
+				logOpenAIStreamFailedFailoverDecision(ctx, account, false, upstreamRequestID, dataBytes, outputStarted, false, reason)
 				forceFlushFailedEvent = true
 				sawFailedEvent = true
 			}
