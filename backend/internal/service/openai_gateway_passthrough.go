@@ -888,16 +888,13 @@ func openAIStreamTerminalShouldFailover(data []byte, eventType string, clientOut
 		return false
 	}
 	switch strings.TrimSpace(eventType) {
-	case "response.completed", "response.done":
+	case "response.completed", "response.done", "response.incomplete", "response.cancelled", "response.canceled":
 	default:
 		return false
 	}
 
-	for _, path := range []string{"usage", "response.usage", "tool_usage", "response.tool_usage"} {
-		usage := gjson.GetBytes(data, path)
-		if usage.Exists() && usage.IsObject() && len(usage.Map()) > 0 {
-			return false
-		}
+	if openAIStreamTerminalHasUsageSignal(data) {
+		return false
 	}
 	for _, path := range []string{"output", "response.output"} {
 		output := gjson.GetBytes(data, path)
@@ -911,6 +908,37 @@ func openAIStreamTerminalShouldFailover(data []byte, eventType string, clientOut
 		}
 	}
 	return true
+}
+
+// openAIStreamTerminalHasUsageSignal keeps an attempt non-replayable only
+// when the terminal event proves that upstream work was actually consumed.
+// A compatibility upstream may send a syntactically non-empty usage object
+// with every count set to zero; that is not enough to turn an empty response
+// into a successful stream or to suppress safe account failover.
+func openAIStreamTerminalHasUsageSignal(data []byte) bool {
+	if usage, ok := extractOpenAIUsageFromJSONBytes(data); ok && openAIUsageHasPositiveTokenSignal(usage) {
+		return true
+	}
+
+	// Tool usage may be billed independently of token usage (for example,
+	// hosted image generation). Preserve the prior conservative behavior when
+	// an upstream reports a non-empty tool usage object.
+	for _, path := range []string{"tool_usage", "response.tool_usage"} {
+		toolUsage := gjson.GetBytes(data, path)
+		if toolUsage.Exists() && toolUsage.IsObject() && len(toolUsage.Map()) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func openAIUsageHasPositiveTokenSignal(usage OpenAIUsage) bool {
+	return usage.InputTokens > 0 ||
+		usage.ImageInputTokens > 0 ||
+		usage.OutputTokens > 0 ||
+		usage.CacheCreationInputTokens > 0 ||
+		usage.CacheReadInputTokens > 0 ||
+		usage.ImageOutputTokens > 0
 }
 
 func openAIStreamFailedEventSemanticStatus(payload []byte, message string) int {
