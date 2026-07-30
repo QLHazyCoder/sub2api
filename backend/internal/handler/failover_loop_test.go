@@ -266,6 +266,26 @@ func TestHandleFailoverError_BasicSwitch(t *testing.T) {
 	})
 }
 
+func TestHandleFailoverError_RequestScopedCapacityImmediatelySwitches(t *testing.T) {
+	mock := &mockTempUnscheduler{}
+	fs := NewFailoverState(3, false)
+	err := &service.UpstreamFailoverError{
+		StatusCode:             http.StatusBadRequest,
+		RetryableOnSameAccount: false,
+		Scope:                  service.GatewayFailureScopeRequest,
+		Reason:                 service.GatewayFailureReason("openai_selected_model_capacity"),
+		NextAccountAction:      service.NextAccountRetry,
+	}
+
+	action := fs.HandleFailoverError(context.Background(), mock, 100, service.PlatformOpenAI, maxSameAccountRetries, err)
+
+	require.Equal(t, FailoverContinue, action)
+	require.Equal(t, 1, fs.SwitchCount)
+	require.Contains(t, fs.FailedAccountIDs, int64(100))
+	require.NotContains(t, fs.SameAccountRetryCount, int64(100))
+	require.Empty(t, mock.calls, "请求级容量错误不应调用 TempUnschedule")
+}
+
 // ---------------------------------------------------------------------------
 // HandleFailoverError — 缓存计费 (ForceCacheBilling)
 // ---------------------------------------------------------------------------

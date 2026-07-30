@@ -305,6 +305,47 @@ func TestIsOpenAITransientProcessingError(t *testing.T) {
 	))
 }
 
+func TestIsOpenAISelectedModelCapacityError(t *testing.T) {
+	tests := []struct {
+		name         string
+		upstreamMsg  string
+		upstreamBody []byte
+		want         bool
+	}{
+		{
+			name:        "upstream message",
+			upstreamMsg: "Selected model is at capacity. Please try a different model.",
+			want:        true,
+		},
+		{
+			name:         "error message",
+			upstreamBody: []byte(`{"error":{"message":"Selected model is at capacity. Please try a different model."}}`),
+			want:         true,
+		},
+		{
+			name:         "responses error message",
+			upstreamBody: []byte(`{"response":{"error":{"message":"Selected model is at capacity. Please try a different model."}}}`),
+			want:         true,
+		},
+		{
+			name:         "raw body fallback",
+			upstreamBody: []byte(`{"detail":"Selected model is at capacity. Please try a different model."}`),
+			want:         true,
+		},
+		{
+			name:         "unrelated error",
+			upstreamBody: []byte(`{"error":{"message":"Invalid type for input"}}`),
+			want:         false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, isOpenAISelectedModelCapacityError(tt.upstreamMsg, tt.upstreamBody))
+		})
+	}
+}
+
 func TestIsOpenAIContextWindowError(t *testing.T) {
 	require.True(t, isOpenAIContextWindowError(
 		"",
@@ -430,7 +471,7 @@ func TestOpenAIGatewayService_Forward_TransientProcessingErrorTriggersFailover(t
 	require.False(t, c.Writer.Written(), "service 层应返回 failover 错误给上层换号，而不是直接向客户端写响应")
 }
 
-func TestOpenAIGatewayService_Forward_ModelCapacityErrorTriggersFailoverAndSameAccountRetry(t *testing.T) {
+func TestOpenAIGatewayService_Forward_ModelCapacityErrorTriggersImmediateNextAccountFailover(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
@@ -477,7 +518,12 @@ func TestOpenAIGatewayService_Forward_ModelCapacityErrorTriggersFailoverAndSameA
 	var failoverErr *UpstreamFailoverError
 	require.ErrorAs(t, err, &failoverErr)
 	require.Equal(t, http.StatusBadRequest, failoverErr.StatusCode)
-	require.True(t, failoverErr.RetryableOnSameAccount)
+	require.False(t, failoverErr.RetryableOnSameAccount)
+	require.Equal(t, GatewayFailureScopeRequest, failoverErr.Scope)
+	require.Equal(t, openAISelectedModelCapacityReason, failoverErr.Reason)
+	require.Equal(t, NextAccountRetry, failoverErr.NextAccountAction)
+	require.True(t, failoverErr.ShouldRetryNextAccount())
+	require.False(t, failoverErr.ShouldReportAccountScheduleFailure())
 	require.Contains(t, string(failoverErr.ResponseBody), "Selected model is at capacity")
-	require.False(t, c.Writer.Written(), "service 层应返回 failover 错误给上层重试/换号，而不是直接向客户端写响应")
+	require.False(t, c.Writer.Written(), "service 层应返回 failover 错误给上层换号，而不是直接向客户端写响应")
 }
