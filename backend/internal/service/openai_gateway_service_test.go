@@ -1516,8 +1516,135 @@ func TestOpenAIStreamingResponseFailedBeforeOutputCapacityErrorReturnsFailover(t
 	require.ErrorAs(t, err, &failoverErr)
 	require.Equal(t, http.StatusBadGateway, failoverErr.StatusCode)
 	require.Contains(t, string(failoverErr.ResponseBody), "Selected model is at capacity")
+	require.False(t, failoverErr.RetryableOnSameAccount)
+	require.Equal(t, GatewayFailureScopeRequest, failoverErr.Scope)
+	require.Equal(t, openAISelectedModelCapacityReason, failoverErr.Reason)
+	require.True(t, failoverErr.ShouldRetryNextAccount())
+	require.False(t, failoverErr.ShouldReportAccountScheduleFailure())
 	require.False(t, c.Writer.Written())
 	require.Empty(t, rec.Body.String())
+}
+
+func TestOpenAIStreamingCapacityBeforeOutputBypassesPassthroughRule(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	newResponse := func() *http.Response {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(strings.Join([]string{
+				`data: {"type":"response.created","response":{"id":"resp_capacity_rule"}}`,
+				"",
+				`data: {"type":"response.failed","error":{"type":"invalid_request_error","message":"Selected model is at capacity. Please try a different model."}}`,
+				"",
+			}, "\n"))),
+			Header: http.Header{"X-Request-Id": []string{"rid-capacity-rule"}},
+		}
+	}
+
+	for _, passthrough := range []bool{false, true} {
+		name := "native"
+		if passthrough {
+			name = "passthrough"
+		}
+		t.Run(name, func(t *testing.T) {
+			svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			rule := newNonFailoverPassthroughRule(http.StatusBadRequest, "selected model is at capacity", http.StatusBadRequest, "")
+			rule.Platforms = []string{PlatformOpenAI}
+			ruleSvc := &ErrorPassthroughService{}
+			ruleSvc.setLocalCache([]*model.ErrorPassthroughRule{rule})
+			BindErrorPassthroughService(c, ruleSvc)
+
+			var err error
+			if passthrough {
+				_, err = svc.handleStreamingResponsePassthrough(c.Request.Context(), newResponse(), c, &Account{ID: 1, Platform: PlatformOpenAI, Name: "acc"}, time.Now(), "model", "model")
+			} else {
+				_, err = svc.handleStreamingResponse(c.Request.Context(), newResponse(), c, &Account{ID: 1, Platform: PlatformOpenAI, Name: "acc"}, time.Now(), "model", "model")
+			}
+
+			require.Error(t, err)
+			var failoverErr *UpstreamFailoverError
+			require.ErrorAs(t, err, &failoverErr)
+			require.Equal(t, GatewayFailureScopeRequest, failoverErr.Scope)
+			require.Equal(t, openAISelectedModelCapacityReason, failoverErr.Reason)
+			require.False(t, IsResponseCommitted(c))
+			require.Empty(t, rec.Body.String())
+		})
+	}
+}
+
+func TestOpenAIStreamingBareCapacityErrorBeforeOutputReturnsFailover(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	newResponse := func() *http.Response {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(strings.Join([]string{
+				`event: error`,
+				`data: {"type":"error","error":{"type":"invalid_request_error","message":"Selected model is at capacity. Please try a different model."}}`,
+				"",
+			}, "\n"))),
+			Header: http.Header{"X-Request-Id": []string{"rid-bare-capacity"}},
+		}
+	}
+
+	for _, passthrough := range []bool{false, true} {
+		name := "native"
+		if passthrough {
+			name = "passthrough"
+		}
+		t.Run(name, func(t *testing.T) {
+			svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+			var err error
+			if passthrough {
+				_, err = svc.handleStreamingResponsePassthrough(c.Request.Context(), newResponse(), c, &Account{ID: 1, Platform: PlatformOpenAI, Name: "acc"}, time.Now(), "model", "model")
+			} else {
+				_, err = svc.handleStreamingResponse(c.Request.Context(), newResponse(), c, &Account{ID: 1, Platform: PlatformOpenAI, Name: "acc"}, time.Now(), "model", "model")
+			}
+
+			require.Error(t, err)
+			var failoverErr *UpstreamFailoverError
+			require.ErrorAs(t, err, &failoverErr)
+			require.Equal(t, GatewayFailureScopeRequest, failoverErr.Scope)
+			require.Equal(t, openAISelectedModelCapacityReason, failoverErr.Reason)
+			require.Empty(t, rec.Body.String())
+		})
+	}
+}
+
+func TestOpenAIStreamingResponseFailedAfterOutputCapacityDoesNotReplayOrReportSchedulerFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(strings.Join([]string{
+			`data: {"type":"response.created","response":{"id":"resp_capacity"}}`,
+			"",
+			`data: {"type":"response.output_text.delta","delta":"partial"}`,
+			"",
+			`data: {"type":"response.failed","error":{"type":"invalid_request_error","message":"Selected model is at capacity. Please try a different model."}}`,
+			"",
+		}, "\n"))),
+		Header: http.Header{"X-Request-Id": []string{"rid-capacity-after-output"}},
+	}
+
+	_, err := svc.handleStreamingResponse(c.Request.Context(), resp, c, &Account{ID: 1, Platform: PlatformOpenAI, Name: "acc"}, time.Now(), "model", "model")
+	require.Error(t, err)
+	var failoverErr *UpstreamFailoverError
+	require.False(t, errors.As(err, &failoverErr), "semantic output must prevent replay")
+	require.True(t, IsOpenAISelectedModelCapacityStreamFailure(err))
+	require.False(t, ShouldReportOpenAIStreamFailureToScheduler(err))
+	require.True(t, ShouldReportOpenAIStreamFailureToScheduler(errors.New("upstream response failed: Selected model is at capacity. Please try a different model.")))
+	require.Contains(t, rec.Body.String(), `"delta":"partial"`)
+	require.Contains(t, rec.Body.String(), "Selected model is at capacity")
 }
 
 func TestOpenAIStreamingResponseFailedBeforeOutputServerOverloadedCodeReturnsFailover(t *testing.T) {
@@ -3544,6 +3671,48 @@ func TestHandleSSEToJSON_ResponseFailedReturnsProtocolError(t *testing.T) {
 	require.Equal(t, http.StatusBadGateway, rec.Code)
 	require.Contains(t, rec.Body.String(), "upstream rejected request")
 	require.Contains(t, rec.Header().Get("Content-Type"), "application/json")
+}
+
+func TestHandleSSEToJSON_CapacityFailureReturnsRequestScopedFailover(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	for _, passthrough := range []bool{false, true} {
+		for _, eventType := range []string{"response.failed", "error"} {
+			name := eventType
+			if passthrough {
+				name += "/passthrough"
+			} else {
+				name += "/native"
+			}
+			t.Run(name, func(t *testing.T) {
+				rec := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(rec)
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+				svc := &OpenAIGatewayService{cfg: &config.Config{}}
+				resp := &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "X-Request-Id": []string{"rid-compact-capacity"}},
+				}
+				body := []byte("data: {\"type\":\"" + eventType + "\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Selected model is at capacity. Please try a different model.\"}}\n\n")
+
+				var err error
+				if passthrough {
+					_, err = svc.handlePassthroughSSEToJSON(resp, c, body, "model", "model")
+				} else {
+					_, err = svc.handleSSEToJSON(resp, c, body, "model", "model")
+				}
+
+				require.Error(t, err)
+				var failoverErr *UpstreamFailoverError
+				require.ErrorAs(t, err, &failoverErr)
+				require.Equal(t, GatewayFailureScopeRequest, failoverErr.Scope)
+				require.Equal(t, openAISelectedModelCapacityReason, failoverErr.Reason)
+				require.False(t, failoverErr.RetryableOnSameAccount)
+				require.True(t, failoverErr.ShouldRetryNextAccount())
+				require.Empty(t, rec.Body.String())
+			})
+		}
+	}
 }
 
 func TestOpenAICompatSSEFrameParserResetsEventTypeAtFrameBoundary(t *testing.T) {

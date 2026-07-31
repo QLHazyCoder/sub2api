@@ -457,7 +457,7 @@ func (s *OpenAIGatewayService) handleChatBufferedStreamingResponse(
 			return nil, fmt.Errorf("upstream response failed (passthrough): %s", errMsg)
 		}
 		writeChatCompletionsError(c, http.StatusBadGateway, "upstream_error", message)
-		return nil, fmt.Errorf("upstream response failed: %s", message)
+		return nil, newOpenAIStreamFailedEventError(message, payload)
 	}
 
 	// When the terminal event has an empty output array, reconstruct from
@@ -644,7 +644,7 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 			if !clientDisconnected {
 				c.Writer.Flush()
 			}
-			streamNonFailoverErr = fmt.Errorf("upstream response failed: %s", message)
+			streamNonFailoverErr = newOpenAIStreamFailedEventError(message, payloadBytes)
 			return true
 		}
 

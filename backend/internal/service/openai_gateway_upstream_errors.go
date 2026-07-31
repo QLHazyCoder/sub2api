@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -305,6 +306,43 @@ func newOpenAIUpstreamFailoverError(
 // same request even though the selected account rejected its serialized size.
 func (e *UpstreamFailoverError) IsOpenAIRequestBodyTooLarge() bool {
 	return e != nil && e.Reason == openAIRequestBodyTooLargeReason
+}
+
+// openAISelectedModelCapacityStreamError marks a capacity response.failed that
+// was already delivered in an SSE stream. It must remain a normal error rather
+// than an UpstreamFailoverError: replaying after semantic client output could
+// duplicate a tool call, text, or visible reasoning.
+type openAISelectedModelCapacityStreamError struct {
+	message string
+}
+
+func (e *openAISelectedModelCapacityStreamError) Error() string {
+	if e == nil {
+		return "upstream response failed"
+	}
+	return fmt.Sprintf("upstream response failed: %s", e.message)
+}
+
+func newOpenAIStreamFailedEventError(message string, upstreamBody []byte) error {
+	if isOpenAISelectedModelCapacityError(message, upstreamBody) {
+		return &openAISelectedModelCapacityStreamError{message: message}
+	}
+	return fmt.Errorf("upstream response failed: %s", message)
+}
+
+// IsOpenAISelectedModelCapacityStreamFailure reports a capacity failure that
+// reached a stream terminal event after output was committed. The caller must
+// not replay it, and must not count it against account scheduling health.
+func IsOpenAISelectedModelCapacityStreamFailure(err error) bool {
+	var capacityErr *openAISelectedModelCapacityStreamError
+	return errors.As(err, &capacityErr)
+}
+
+// ShouldReportOpenAIStreamFailureToScheduler keeps the post-output capacity
+// exception intentionally narrow. Other non-failover stream failures preserve
+// the legacy scheduler-health behavior.
+func ShouldReportOpenAIStreamFailureToScheduler(err error) bool {
+	return !IsOpenAISelectedModelCapacityStreamFailure(err)
 }
 
 func marshalOpenAIUpstreamJSON(v any) ([]byte, error) {

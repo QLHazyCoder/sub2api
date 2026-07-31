@@ -1174,10 +1174,7 @@ func (s *OpenAIGatewayService) newOpenAIStreamFailoverError(
 			"message": message,
 		},
 	})
-	return &UpstreamFailoverError{
-		StatusCode:   http.StatusBadGateway,
-		ResponseBody: body,
-	}
+	return newOpenAIUpstreamFailoverError(http.StatusBadGateway, nil, body, message, false)
 }
 
 func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
@@ -1384,8 +1381,11 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithReasoning(
 				}
 			}
 			eventType := strings.TrimSpace(gjson.Get(trimmedData, "type").String())
-			if eventType == "response.failed" {
+			if eventType == "response.failed" || eventType == "error" {
 				failedMessage = extractOpenAISSEErrorMessage(dataBytes)
+				if eventType == "error" {
+					sawTerminalEvent = true
+				}
 				// response.failed 自带上游已消耗的 usage（input token 通常已扣）；必须先解析
 				// 再打 cyber 标记，否则 mark 记到的是解析前的 0，导致流式 cyber 按 0 token 计费
 				// 而漏记真实用量。对齐 WS V2 / Chat 流式路径（均先解析 usage 再 Mark）。
@@ -1402,6 +1402,11 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithReasoning(
 				}
 				outputStarted := openAIStreamClientOutputStarted(c, clientOutputStarted)
 				if !outputStarted {
+					if isOpenAISelectedModelCapacityError(failedMessage, dataBytes) {
+						logOpenAIStreamFailedFailoverDecision(ctx, account, true, upstreamRequestID, dataBytes, outputStarted, true, "selected_model_capacity_pre_output")
+						return resultWithUsage(),
+							s.newOpenAIStreamFailoverError(c, account, true, upstreamRequestID, dataBytes, failedMessage)
+					}
 					if status, errType, errMsg, matched := applyOpenAIStreamFailedErrorPassthroughRule(c, account.Platform, dataBytes, failedMessage); matched {
 						logOpenAIStreamFailedFailoverDecision(ctx, account, true, upstreamRequestID, dataBytes, outputStarted, false, "passthrough_rule")
 						// 命中透传规则也要记录 ops 上游错误事件（对齐 CC/Messages 与
@@ -1530,7 +1535,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithReasoning(
 			return resultWithUsage(), nil
 		}
 		if sawFailedEvent {
-			return resultWithUsage(), fmt.Errorf("upstream response failed: %s", failedMessage)
+			return resultWithUsage(), newOpenAIStreamFailedEventError(failedMessage, nil)
 		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return resultWithUsage(), fmt.Errorf("stream usage incomplete: %w", err)
@@ -1560,7 +1565,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithReasoning(
 		return resultWithUsage(), fmt.Errorf("stream read error: %w", err)
 	}
 	if sawFailedEvent {
-		return resultWithUsage(), fmt.Errorf("upstream response failed: %s", failedMessage)
+		return resultWithUsage(), newOpenAIStreamFailedEventError(failedMessage, nil)
 	}
 	if !clientDisconnected && !sawDone && !sawTerminalEvent && ctx.Err() == nil {
 		logger.FromContext(ctx).With(
@@ -1676,10 +1681,13 @@ func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c
 		body = restoredBody
 	} else {
 		terminalType, terminalPayload, terminalOK := extractOpenAISSETerminalEvent(bodyText)
-		if terminalOK && terminalType == "response.failed" {
+		if terminalOK && (terminalType == "response.failed" || isOpenAISelectedModelCapacityError("", terminalPayload)) {
 			msg := extractOpenAISSEErrorMessage(terminalPayload)
 			if msg == "" {
 				msg = "Upstream compact response failed"
+			}
+			if isOpenAISelectedModelCapacityError(msg, terminalPayload) {
+				return nil, s.newOpenAIStreamFailoverError(c, nil, true, resp.Header.Get("x-request-id"), terminalPayload, msg)
 			}
 			return nil, s.writeOpenAINonStreamingProtocolError(resp, c, msg)
 		}

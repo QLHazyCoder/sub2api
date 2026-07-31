@@ -335,7 +335,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			return resultWithUsage(), fmt.Errorf("stream usage incomplete: missing terminal event")
 		}
 		if sawFailedEvent {
-			return resultWithUsage(), fmt.Errorf("upstream response failed: %s", failedMessage)
+			return resultWithUsage(), newOpenAIStreamFailedEventError(failedMessage, nil)
 		}
 		return resultWithUsage(), nil
 	}
@@ -414,8 +414,14 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				responseID = extractOpenAIResponseIDFromJSONBytes(dataBytes)
 			}
 			forceFlushFailedEvent := false
-			if eventType == "response.failed" {
+			if eventType == "response.failed" || eventType == "error" {
 				failedMessage = extractOpenAISSEErrorMessage(dataBytes)
+				if eventType == "error" {
+					// Some OpenAI-compatible upstreams use a bare error event instead
+					// of response.failed. Treat it as terminal so a pre-output capacity
+					// failure can still switch accounts without exposing it downstream.
+					sawTerminalEvent = true
+				}
 				// response.failed 自带上游已消耗的 usage（input token 通常已扣）；必须先解析
 				// 再打 cyber 标记，否则 mark 记到的是解析前的 0，导致流式 cyber 按 0 token 计费
 				// 而漏记真实用量。对齐 WS V2 / Chat 流式路径（均先解析 usage 再 Mark）。
@@ -432,6 +438,15 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				}
 				outputStarted := openAIStreamClientOutputStarted(c, clientOutputStarted)
 				if !outputStarted {
+					// Capacity is request-scoped and must win over configurable error
+					// passthrough rules. Sending it to the client here would defeat the
+					// safe, pre-output account failover below.
+					if isOpenAISelectedModelCapacityError(failedMessage, dataBytes) {
+						sawFailedEvent = true
+						logOpenAIStreamFailedFailoverDecision(ctx, account, false, upstreamRequestID, dataBytes, outputStarted, true, "selected_model_capacity_pre_output")
+						streamEarlyErr = s.newOpenAIStreamFailoverError(c, account, false, upstreamRequestID, dataBytes, failedMessage)
+						return
+					}
 					if status, errType, errMsg, matched := applyOpenAIStreamFailedErrorPassthroughRule(c, account.Platform, dataBytes, failedMessage); matched {
 						sawFailedEvent = true
 						logOpenAIStreamFailedFailoverDecision(ctx, account, false, upstreamRequestID, dataBytes, outputStarted, false, "passthrough_rule")
@@ -1275,10 +1290,13 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 		body = restoredBody
 	} else {
 		terminalType, terminalPayload, terminalOK := extractOpenAISSETerminalEvent(bodyText)
-		if terminalOK && terminalType == "response.failed" {
+		if terminalOK && (terminalType == "response.failed" || isOpenAISelectedModelCapacityError("", terminalPayload)) {
 			msg := extractOpenAISSEErrorMessage(terminalPayload)
 			if msg == "" {
 				msg = "Upstream compact response failed"
+			}
+			if isOpenAISelectedModelCapacityError(msg, terminalPayload) {
+				return nil, s.newOpenAIStreamFailoverError(c, nil, false, resp.Header.Get("x-request-id"), terminalPayload, msg)
 			}
 			return nil, s.writeOpenAINonStreamingProtocolError(resp, c, msg)
 		}
@@ -1320,7 +1338,7 @@ func extractOpenAISSETerminalEvent(body string) (string, []byte, bool) {
 		}
 		eventType := strings.TrimSpace(gjson.GetBytes(data, "type").String())
 		switch eventType {
-		case "response.completed", "response.done", "response.failed", "response.incomplete", "response.cancelled", "response.canceled":
+		case "response.completed", "response.done", "response.failed", "response.incomplete", "response.cancelled", "response.canceled", "error":
 			terminalType = eventType
 			terminalPayload = append([]byte(nil), data...)
 		}
