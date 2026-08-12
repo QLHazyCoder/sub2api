@@ -2425,6 +2425,10 @@ func (s *RateLimitService) HandleStreamTimeout(ctx context.Context, account *Acc
 	if account == nil {
 		return false
 	}
+	if account.IsPoolMode() {
+		slog.Info("stream_timeout_pool_mode_state_skipped", "account_id", account.ID, "model", model)
+		return false
+	}
 
 	// 获取系统设置
 	if s.settingService == nil {
