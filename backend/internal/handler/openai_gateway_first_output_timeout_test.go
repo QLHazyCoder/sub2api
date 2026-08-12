@@ -52,6 +52,17 @@ func TestOpenAIFirstOutputFailoverStopsAfterOneAccountSwitch(t *testing.T) {
 	require.Equal(t, 1, count)
 }
 
+func TestOpenAIStreamDataIntervalTimeoutIsNotLimitedByFirstOutputGuard(t *testing.T) {
+	failoverErr := &service.UpstreamFailoverError{
+		SafeToFailoverAfterWrite: true,
+		Reason:                   service.GatewayFailureReason("openai_stream_data_interval_timeout"),
+	}
+	count := 0
+
+	require.False(t, openAIFirstOutputFailoverExhausted(failoverErr, &count))
+	require.Zero(t, count)
+}
+
 func TestOpenAIRequestAllowsFailoverReplayStopsCanceledClient(t *testing.T) {
 	require.False(t, openAIRequestAllowsFailoverReplay(nil))
 

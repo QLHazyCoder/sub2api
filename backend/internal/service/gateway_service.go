@@ -684,14 +684,14 @@ func (e *UpstreamFailoverError) IsCredentialFailure() bool {
 }
 
 // ShouldReportAccountScheduleFailure prevents provider-/request-scoped
-// credential failures and selected-model capacity responses from being
-// misattributed to the selected account. Legacy and inference failures retain
-// their existing scheduler-health behavior.
+// credential failures and request-level OpenAI stream/capacity responses from
+// being misattributed to the selected account. Legacy and inference failures
+// retain their existing scheduler-health behavior.
 func (e *UpstreamFailoverError) ShouldReportAccountScheduleFailure() bool {
 	if e == nil {
 		return false
 	}
-	if e.Reason == openAISelectedModelCapacityReason {
+	if e.Reason == openAISelectedModelCapacityReason || e.Reason == openAIStreamDataIntervalTimeoutReason {
 		return false
 	}
 	return !e.IsCredentialFailure() || e.Scope == GatewayFailureScopeAccount

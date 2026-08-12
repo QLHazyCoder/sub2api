@@ -1515,6 +1515,48 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithReasoning(
 			return false
 		}
 	}
+	streamDataInterval := time.Duration(0)
+	if account != nil && account.Platform == PlatformOpenAI && s.cfg != nil && s.cfg.Gateway.StreamDataIntervalTimeout > 0 {
+		streamDataInterval = time.Duration(s.cfg.Gateway.StreamDataIntervalTimeout) * time.Second
+	}
+	var streamDataIntervalTimer *time.Timer
+	var streamDataIntervalTimedOut chan struct{}
+	if streamDataInterval > 0 {
+		streamDataIntervalTimedOut = make(chan struct{})
+		streamDataIntervalTimer = time.AfterFunc(streamDataInterval, func() {
+			close(streamDataIntervalTimedOut)
+			_ = resp.Body.Close()
+		})
+		defer func() {
+			if streamDataIntervalTimer != nil {
+				streamDataIntervalTimer.Stop()
+			}
+		}()
+	}
+	streamDataIntervalExpired := func() bool {
+		if streamDataIntervalTimedOut == nil {
+			return false
+		}
+		select {
+		case <-streamDataIntervalTimedOut:
+			return true
+		default:
+			return false
+		}
+	}
+	resetStreamDataInterval := func() bool {
+		if streamDataIntervalTimer == nil || streamDataIntervalExpired() {
+			return false
+		}
+		if !streamDataIntervalTimer.Stop() {
+			// Treat an expired timer whose callback has not yet closed the
+			// notification channel as timed out too; resetting it could let a
+			// late upstream line bypass the failover decision.
+			return false
+		}
+		streamDataIntervalTimer.Reset(streamDataInterval)
+		return true
+	}
 	newFirstOutputTimeoutError := func() *UpstreamFailoverError {
 		return s.newOpenAIFirstOutputTimeoutError(
 			ctx,
@@ -1580,6 +1622,16 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithReasoning(
 	}
 
 	for documentScanner.Scan() {
+		if streamDataIntervalExpired() && !openAIStreamClientOutputStarted(c, clientOutputStarted) {
+			return resultWithUsage(), s.newOpenAIStreamDataIntervalTimeoutError(
+				c, account, true, upstreamRequestID, originalModel, streamDataInterval, resp.Header,
+			)
+		}
+		if streamDataIntervalTimer != nil && !resetStreamDataInterval() && !openAIStreamClientOutputStarted(c, clientOutputStarted) {
+			return resultWithUsage(), s.newOpenAIStreamDataIntervalTimeoutError(
+				c, account, true, upstreamRequestID, originalModel, streamDataInterval, resp.Header,
+			)
+		}
 		line := documentScanner.Text()
 		lineStartsClientOutput := false
 		forceFlushFailedEvent := false
@@ -1778,6 +1830,11 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithReasoning(
 	}
 	if firstOutputTimedOut() && !openAIStreamClientOutputStarted(c, clientOutputStarted) {
 		return resultWithUsage(), newFirstOutputTimeoutError()
+	}
+	if streamDataIntervalExpired() && !openAIStreamClientOutputStarted(c, clientOutputStarted) {
+		return resultWithUsage(), s.newOpenAIStreamDataIntervalTimeoutError(
+			c, account, true, upstreamRequestID, originalModel, streamDataInterval, resp.Header,
+		)
 	}
 	if err := documentScanner.Err(); err != nil {
 		if (sawDone || sawTerminalEvent) && !sawFailedEvent {

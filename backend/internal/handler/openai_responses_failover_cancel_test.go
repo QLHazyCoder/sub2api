@@ -28,6 +28,51 @@ type openAIResponsesFailoverCancelUpstream struct {
 	onFirstDo  func()
 }
 
+type openAIResponsesStreamIdleFailoverUpstream struct {
+	service.HTTPUpstream
+	mu         sync.Mutex
+	accountIDs []int64
+	writers    []*io.PipeWriter
+}
+
+func (u *openAIResponsesStreamIdleFailoverUpstream) Do(_ *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
+	u.mu.Lock()
+	u.accountIDs = append(u.accountIDs, accountID)
+	first := len(u.accountIDs) == 1
+	if first {
+		reader, writer := io.Pipe()
+		u.writers = append(u.writers, writer)
+		u.mu.Unlock()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "X-Request-Id": []string{"idle-first"}},
+			Body:       reader,
+		}, nil
+	}
+	u.mu.Unlock()
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "X-Request-Id": []string{"healthy-second"}},
+		Body: io.NopCloser(bytes.NewBufferString(
+			"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_after_idle\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+		)),
+	}, nil
+}
+
+func (u *openAIResponsesStreamIdleFailoverUpstream) calls() []int64 {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return append([]int64(nil), u.accountIDs...)
+}
+
+func (u *openAIResponsesStreamIdleFailoverUpstream) closeWriters() {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	for _, writer := range u.writers {
+		_ = writer.Close()
+	}
+}
+
 func (u *openAIResponsesFailoverCancelUpstream) Do(_ *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
 	u.mu.Lock()
 	u.accountIDs = append(u.accountIDs, accountID)
@@ -49,7 +94,7 @@ func (u *openAIResponsesFailoverCancelUpstream) calls() []int64 {
 	return append([]int64(nil), u.accountIDs...)
 }
 
-func newOpenAIResponsesFailoverTestHandler(t *testing.T, upstream service.HTTPUpstream) *OpenAIGatewayHandler {
+func newOpenAIResponsesFailoverTestHandler(t *testing.T, upstream service.HTTPUpstream, streamDataIntervalTimeout ...int) *OpenAIGatewayHandler {
 	t.Helper()
 	accounts := []service.Account{
 		{
@@ -77,6 +122,9 @@ func newOpenAIResponsesFailoverTestHandler(t *testing.T, upstream service.HTTPUp
 	}
 	accountRepo := openAIImagesFailoverAccountRepo{accounts: accounts}
 	cfg := &config.Config{RunMode: config.RunModeSimple}
+	if len(streamDataIntervalTimeout) > 0 {
+		cfg.Gateway.StreamDataIntervalTimeout = streamDataIntervalTimeout[0]
+	}
 	gatewayService := service.NewOpenAIGatewayService(
 		accountRepo,
 		nil,
@@ -117,6 +165,33 @@ func newOpenAIResponsesFailoverTestHandler(t *testing.T, upstream service.HTTPUp
 	)
 	handler.maxAccountSwitches = 10
 	return handler
+}
+
+func TestOpenAIGatewayHandlerResponses_StreamDataIntervalFailsOverBeforeSemanticOutput(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstream := &openAIResponsesStreamIdleFailoverUpstream{}
+	t.Cleanup(upstream.closeWriters)
+	handler := newOpenAIResponsesFailoverTestHandler(t, upstream, 1)
+	c, rec := newOpenAIResponsesFailoverTestContext(t, nil)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(
+		`{"model":"gpt-5.1","stream":true,"input":"hello"}`,
+	))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	handler.Responses(c)
+
+	require.Equal(t, []int64{1, 2}, upstream.calls(), "无语义输出的流空闲应立即切换到下一个账号")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "resp_after_idle")
+	require.NotContains(t, rec.Body.String(), "stream_data_interval_timeout")
+	rawEvents, ok := c.Get(service.OpsUpstreamErrorsKey)
+	require.True(t, ok)
+	events, ok := rawEvents.([]*service.OpsUpstreamErrorEvent)
+	require.True(t, ok)
+	require.Len(t, events, 1)
+	require.Equal(t, "stream_data_interval_timeout", events[0].Kind)
+	require.Equal(t, "openai_stream_data_interval_timeout", events[0].Reason)
+	require.Equal(t, "request", events[0].Scope)
 }
 
 func newOpenAIResponsesFailoverTestContext(t *testing.T, ctx context.Context) (*gin.Context, *httptest.ResponseRecorder) {

@@ -315,6 +315,27 @@ func TestHandleFailoverError_RequestScopedCapacityImmediatelySwitches(t *testing
 	require.Empty(t, mock.calls, "请求级容量错误不应调用 TempUnschedule")
 }
 
+func TestHandleFailoverError_RequestScopedStreamDataIntervalImmediatelySwitches(t *testing.T) {
+	mock := &mockTempUnscheduler{}
+	fs := NewFailoverState(3, false)
+	err := &service.UpstreamFailoverError{
+		StatusCode:               http.StatusGatewayTimeout,
+		RetryableOnSameAccount:   false,
+		SafeToFailoverAfterWrite: true,
+		Scope:                    service.GatewayFailureScopeRequest,
+		Reason:                   service.GatewayFailureReason("openai_stream_data_interval_timeout"),
+		NextAccountAction:        service.NextAccountRetry,
+	}
+
+	action := fs.HandleFailoverError(context.Background(), mock, 100, service.PlatformOpenAI, maxSameAccountRetries, err)
+
+	require.Equal(t, FailoverContinue, action)
+	require.Equal(t, 1, fs.SwitchCount)
+	require.Contains(t, fs.FailedAccountIDs, int64(100))
+	require.NotContains(t, fs.SameAccountRetryCount, int64(100))
+	require.Empty(t, mock.calls, "请求级流数据间隔超时不应调用 TempUnschedule")
+}
+
 // ---------------------------------------------------------------------------
 // HandleFailoverError — 缓存计费 (ForceCacheBilling)
 // ---------------------------------------------------------------------------
