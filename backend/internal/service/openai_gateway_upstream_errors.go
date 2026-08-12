@@ -263,9 +263,16 @@ func (s *OpenAIGatewayService) shouldFailoverOpenAIUpstreamResponse(statusCode i
 const OpenAIRequestBodyTooLargeClientMessage = "Request payload is too large"
 
 const (
-	openAIRequestBodyTooLargeReason   = GatewayFailureReason("openai_request_body_too_large")
-	openAISelectedModelCapacityReason = GatewayFailureReason("openai_selected_model_capacity")
+	openAIRequestBodyTooLargeReason       = GatewayFailureReason("openai_request_body_too_large")
+	openAISelectedModelCapacityReason     = GatewayFailureReason("openai_selected_model_capacity")
+	openAIStreamDataIntervalTimeoutReason = GatewayFailureReason("openai_stream_data_interval_timeout")
 )
+
+// IsOpenAIStreamDataIntervalTimeoutFailure identifies the request-scoped
+// pre-output idle failure used by the Responses failover loop.
+func IsOpenAIStreamDataIntervalTimeoutFailure(err *UpstreamFailoverError) bool {
+	return err != nil && err.Reason == openAIStreamDataIntervalTimeoutReason
+}
 
 func isOpenAIRequestBodyTooLargeError(statusCode int, upstreamMsg string, upstreamBody []byte) bool {
 	return statusCode == http.StatusRequestEntityTooLarge && !isOpenAIContextWindowError(upstreamMsg, upstreamBody)
