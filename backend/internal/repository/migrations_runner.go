@@ -178,6 +178,9 @@ func applyMigrationsFS(ctx context.Context, db *sql.DB, fsys fs.FS) error {
 		return fmt.Errorf("list migrations: %w", err)
 	}
 	sort.Strings(files) // 确保按文件名顺序执行迁移
+	if err := validateBlueGreenMigrationPlan(ctx, lockConn, fsys, files); err != nil {
+		return err
+	}
 
 	for _, name := range files {
 		// 读取迁移文件内容
